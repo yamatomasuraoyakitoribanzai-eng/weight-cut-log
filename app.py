@@ -511,6 +511,26 @@ def generate_pdf_report(config, entries):
 
 st.set_page_config(page_title="減量ログ", page_icon="🥊", layout="centered")
 
+def check_password():
+    def password_entered():
+        if st.session_state.get("password_input") == st.secrets.get("APP_PASSWORD"):
+            st.session_state["authenticated"] = True
+            del st.session_state["password_input"]
+        else:
+            st.session_state["authenticated"] = False
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.text_input("パスワード", type="password", key="password_input", on_change=password_entered)
+    if st.session_state.get("authenticated") is False:
+        st.error("パスワードが違います。")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 config = load_config()
 entries = load_entries()
 
