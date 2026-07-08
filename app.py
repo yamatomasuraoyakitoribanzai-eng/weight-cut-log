@@ -87,10 +87,23 @@ def label_for(key):
 
 @st.cache_resource
 def get_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+    url = st.secrets["SUPABASE_URL"].strip()
+    key = st.secrets["SUPABASE_KEY"].strip()
+    for name, value in (("SUPABASE_URL", url), ("SUPABASE_KEY", key)):
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError as e:
+            bad_char = value[e.start:e.end]
+            st.error(
+                f"Secretsの{name}に半角ASCII以外の文字が含まれています"
+                f"(該当文字: {bad_char!r} / コード: U+{ord(bad_char):04X})。\n\n"
+                "多くの場合、Streamlit CloudのSecrets欄に貼り付けた際に日本語IMEが"
+                "オンになっていて、全角コロン「：」や全角スラッシュ「／」、"
+                "全角スペースなどが紛れ込んでいます。IMEをオフにした状態で"
+                f"{name}を一度削除し、半角英数字のみで貼り付け直してください。"
+            )
+            st.stop()
     return create_client(url, key)
-
 
 def _row_to_entry(row):
     entry = {
