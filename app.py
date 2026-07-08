@@ -127,6 +127,8 @@ def load_entries():
 
 
 def upsert_entry(entry):
+    from postgrest.exceptions import APIError
+
     sb = get_supabase()
     extra = {k: v for k, v in entry.items() if k not in NATIVE_KEYS}
     row = {
@@ -138,17 +140,59 @@ def upsert_entry(entry):
         "memo": entry.get("notes"),
         "extra": extra,
     }
-    sb.table("weight_logs").upsert(row, on_conflict="measure_date").execute()
-
+    try:
+        sb.table("weight_logs").upsert(row, on_conflict="measure_date").execute()
+    except APIError as e:
+        st.error(
+            "記録の保存に失敗しました(APIError)。\n\n"
+            f"message: {e.message}\n"
+            f"code: {getattr(e, 'code', None)}\n"
+            f"details: {getattr(e, 'details', None)}\n"
+            f"hint: {getattr(e, 'hint', None)}"
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"記録の保存に失敗しました: {e}")
+        st.stop()
 
 def delete_entry(d):
+    from postgrest.exceptions import APIError
+
     sb = get_supabase()
-    sb.table("weight_logs").delete().eq("measure_date", d).execute()
+    try:
+        sb.table("weight_logs").delete().eq("measure_date", d).execute()
+    except APIError as e:
+        st.error(
+            "記録の削除に失敗しました(APIError)。\n\n"
+            f"message: {e.message}\n"
+            f"code: {getattr(e, 'code', None)}\n"
+            f"details: {getattr(e, 'details', None)}\n"
+            f"hint: {getattr(e, 'hint', None)}"
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"記録の削除に失敗しました: {e}")
+        st.stop()
 
 
 def delete_all_entries():
+    from postgrest.exceptions import APIError
+
     sb = get_supabase()
-    sb.table("weight_logs").delete().gte("measure_date", "1900-01-01").execute()
+    try:
+        sb.table("weight_logs").delete().gte("measure_date", "1900-01-01").execute()
+    except APIError as e:
+        st.error(
+            "全データの削除に失敗しました(APIError)。\n\n"
+            f"message: {e.message}\n"
+            f"code: {getattr(e, 'code', None)}\n"
+            f"details: {getattr(e, 'details', None)}\n"
+            f"hint: {getattr(e, 'hint', None)}"
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"全データの削除に失敗しました: {e}")
+        st.stop()
 
 
 def load_config():
