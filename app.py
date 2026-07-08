@@ -166,14 +166,29 @@ def load_config():
 
 
 def save_config(config):
+    from postgrest.exceptions import APIError
+
     sb = get_supabase()
-    sb.table("app_config").upsert({
-        "id": 1,
-        "weigh_in_date": config.get("weighInDate"),
-        "fight_date": config.get("fightDate"),
-        "start_weight": config.get("startWeight"),
-        "target_weight": config.get("targetWeight"),
-    }).execute()
+    try:
+        sb.table("app_config").upsert({
+            "id": 1,
+            "weigh_in_date": config.get("weighInDate"),
+            "fight_date": config.get("fightDate"),
+            "start_weight": config.get("startWeight"),
+            "target_weight": config.get("targetWeight"),
+        }, on_conflict="id").execute()
+    except APIError as e:
+        st.error(
+            "app_configへの保存に失敗しました(APIError)。\n\n"
+            f"message: {e.message}\n"
+            f"code: {getattr(e, 'code', None)}\n"
+            f"details: {getattr(e, 'details', None)}\n"
+            f"hint: {getattr(e, 'hint', None)}"
+        )
+        st.stop()
+    except Exception as e:
+        st.error(f"app_configへの保存に失敗しました: {e}")
+        st.stop()
 
 
 def parse_date(s):
