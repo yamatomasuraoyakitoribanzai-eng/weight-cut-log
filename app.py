@@ -678,7 +678,15 @@ else:
 st.subheader("レポート出力")
 if st.button("📄 PDFレポートを生成"):
     pdf_bytes = generate_pdf_report(config, entries)
-    st.download_button("レポートをダウンロード (PDF)", data=pdf_bytes,
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    pdf_data_url = f"data:application/pdf;base64,{b64}"
+    st.markdown(
+        f'<a href="{pdf_data_url}" target="_blank" rel="noopener noreferrer">'
+        f'📄 新しいタブでレポートを開く</a>',
+        unsafe_allow_html=True,
+    )
+    st.caption("開いたタブの中で、ブラウザ標準の保存・印刷ボタンからPDF保存できます。")
+    st.download_button("(うまく開けない場合はこちら: 直接ダウンロード)", data=pdf_bytes,
                         file_name=f"減量レポート_{date.today().isoformat()}.pdf", mime="application/pdf")
 
 st.subheader("画像から自動入力")
