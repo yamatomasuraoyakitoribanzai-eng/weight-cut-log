@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import create_client
 
 DEFAULT_CONFIG = {
@@ -679,16 +680,30 @@ st.subheader("レポート出力")
 if st.button("📄 PDFレポートを生成"):
     pdf_bytes = generate_pdf_report(config, entries)
     b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-    pdf_data_url = f"data:application/pdf;base64,{b64}"
-    st.markdown(
-        f'<a href="{pdf_data_url}" target="_blank" rel="noopener noreferrer">'
-        f'📄 新しいタブでレポートを開く</a>',
-        unsafe_allow_html=True,
+    components.html(
+        f"""
+        <script>
+        function openPdf() {{
+            const binary = atob("{b64}");
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {{
+                bytes[i] = binary.charCodeAt(i);
+            }}
+            const blob = new Blob([bytes], {{ type: 'application/pdf' }});
+            const url = URL.createObjectURL(blob);
+            window.open(url, '_blank');
+        }}
+        </script>
+        <button onclick="openPdf()" style="padding:10px 18px;font-size:15px;cursor:pointer;border-radius:6px;border:1px solid #999;background:#f0f0f0;">
+            📄 新しいタブでレポートを開く
+        </button>
+        """,
+        height=60,
     )
     st.caption("開いたタブの中で、ブラウザ標準の保存・印刷ボタンからPDF保存できます。")
     st.download_button("(うまく開けない場合はこちら: 直接ダウンロード)", data=pdf_bytes,
                         file_name=f"減量レポート_{date.today().isoformat()}.pdf", mime="application/pdf")
-
 st.subheader("画像から自動入力")
 api_key = st.text_input("Anthropic APIキー", value=os.environ.get("ANTHROPIC_API_KEY", ""), type="password",
                          help="ヘルスケアアプリ・体組成計アプリのスクリーンショットから自動で数値を読み取るために使います。")
