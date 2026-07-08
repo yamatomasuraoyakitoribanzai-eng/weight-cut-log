@@ -595,7 +595,7 @@ with st.expander("⚙️ 設定(計量日・試合日・目標体重)", expanded
         })
         st.success("保存しました")
         st.rerun()
-   st.caption("全データを削除するには、下の欄に「削除」と入力してください。")
+    st.caption("全データを削除するには、下の欄に「削除」と入力してください。")
     confirm_text = st.text_input("確認", key="confirm_delete_all", label_visibility="collapsed", placeholder="ここに「削除」と入力")
     if st.button("🗑️ 全データを削除", type="secondary", disabled=(confirm_text != "削除")):
         delete_all_entries()
