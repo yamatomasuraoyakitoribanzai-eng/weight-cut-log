@@ -1,12 +1,16 @@
 """
-減量ログ - Streamlit版
+減量ログ - Streamlit版 (Supabase永続化・スマホ最適化版)
 Claude Artifact (React) から移植した減量・コンディション管理ツール。
 
 実行方法:
     pip install -r requirements.txt
     streamlit run app.py
 
-画像自動入力機能を使う場合は、Anthropic APIキーが必要です(サイドバーで入力するか、
+.streamlit/secrets.toml に以下を設定してください:
+    SUPABASE_URL = "https://xxxx.supabase.co"
+    SUPABASE_KEY = "sb_publishable_xxxx"
+
+画像自動入力機能を使う場合は、Anthropic APIキーが必要です(画面で入力するか、
 環境変数 ANTHROPIC_API_KEY を設定してください)。
 """
 
@@ -20,8 +24,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-
-DATA_FILE = "weight_cut_data.json"
+from supabase import create_client
 
 DEFAULT_CONFIG = {
     "fightDate": None,
@@ -72,6 +75,8 @@ ALL_NUMERIC_KEYS = [m[0] for m in METRICS]
 
 TABLE_EXTRA_LABELS = {"mbaRating": ("MBA判定", ""), "targetHRRange": ("運動時目標脈拍", "")}
 
+NATIVE_KEYS = {"date", "weight", "bodyFat", "muscleMass", "bodyWater", "notes"}
+
 
 def label_for(key):
     if key in METRIC_BY_KEY:
@@ -80,22 +85,82 @@ def label_for(key):
     return TABLE_EXTRA_LABELS.get(key, (key, ""))
 
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                config = {**DEFAULT_CONFIG, **data.get("config", {})}
-                entries = data.get("entries", [])
-                return config, entries
-        except Exception:
-            pass
-    return dict(DEFAULT_CONFIG), []
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 
-def save_data(config, entries):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({"config": config, "entries": entries}, f, ensure_ascii=False, indent=2)
+def _row_to_entry(row):
+    entry = {
+        "date": row["measure_date"],
+        "weight": row.get("weight"),
+        "bodyFat": row.get("body_fat"),
+        "muscleMass": row.get("muscle"),
+        "bodyWater": row.get("water"),
+        "notes": row.get("memo"),
+    }
+    entry.update(dict(row.get("extra") or {}))
+    entry.setdefault("skin", 2)
+    entry.setdefault("cond", 2)
+    return entry
+
+
+def load_entries():
+    sb = get_supabase()
+    res = sb.table("weight_logs").select("*").order("measure_date").execute()
+    return [_row_to_entry(row) for row in res.data]
+
+
+def upsert_entry(entry):
+    sb = get_supabase()
+    extra = {k: v for k, v in entry.items() if k not in NATIVE_KEYS}
+    row = {
+        "measure_date": entry["date"],
+        "weight": entry.get("weight"),
+        "body_fat": entry.get("bodyFat"),
+        "muscle": entry.get("muscleMass"),
+        "water": entry.get("bodyWater"),
+        "memo": entry.get("notes"),
+        "extra": extra,
+    }
+    sb.table("weight_logs").upsert(row, on_conflict="measure_date").execute()
+
+
+def delete_entry(d):
+    sb = get_supabase()
+    sb.table("weight_logs").delete().eq("measure_date", d).execute()
+
+
+def delete_all_entries():
+    sb = get_supabase()
+    sb.table("weight_logs").delete().gte("measure_date", "1900-01-01").execute()
+
+
+def load_config():
+    sb = get_supabase()
+    res = sb.table("app_config").select("*").eq("id", 1).execute()
+    if res.data:
+        row = res.data[0]
+        return {
+            "weighInDate": row.get("weigh_in_date"),
+            "fightDate": row.get("fight_date"),
+            "startWeight": row.get("start_weight"),
+            "targetWeight": row.get("target_weight"),
+        }
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(config):
+    sb = get_supabase()
+    sb.table("app_config").upsert({
+        "id": 1,
+        "weigh_in_date": config.get("weighInDate"),
+        "fight_date": config.get("fightDate"),
+        "start_weight": config.get("startWeight"),
+        "target_weight": config.get("targetWeight"),
+    }).execute()
 
 
 def parse_date(s):
@@ -418,57 +483,48 @@ def generate_pdf_report(config, entries):
 
 st.set_page_config(page_title="減量ログ", page_icon="🥊", layout="centered")
 
-if "config" not in st.session_state:
-    st.session_state.config, st.session_state.entries = load_data()
-
-config = st.session_state.config
-entries = sorted(st.session_state.entries, key=lambda e: e["date"])
+config = load_config()
+entries = load_entries()
 
 st.markdown("###### CORNER BOARD")
 st.title("減量ログ")
 
 with st.expander("⚙️ 設定(計量日・試合日・目標体重)", expanded=not config.get("weighInDate")):
-    c1, c2 = st.columns(2)
-    weigh_in = c1.date_input("計量日", value=parse_date(config.get("weighInDate")) or date.today())
-    fight = c2.date_input("試合日", value=parse_date(config.get("fightDate")) or date.today())
-    c3, c4 = st.columns(2)
-    start_w = c3.number_input("開始体重 (kg)", value=float(config.get("startWeight") or 0.0), step=0.01, format="%.2f")
-    target_w = c4.number_input("目標体重 (kg)", value=float(config.get("targetWeight") or 0.0), step=0.01, format="%.2f")
+    weigh_in = st.date_input("計量日", value=parse_date(config.get("weighInDate")) or date.today())
+    fight = st.date_input("試合日", value=parse_date(config.get("fightDate")) or date.today())
+    start_w = st.number_input("開始体重 (kg)", value=float(config.get("startWeight") or 0.0), step=0.01, format="%.2f")
+    target_w = st.number_input("目標体重 (kg)", value=float(config.get("targetWeight") or 0.0), step=0.01, format="%.2f")
     if st.button("設定を保存"):
-        config["weighInDate"] = weigh_in.isoformat()
-        config["fightDate"] = fight.isoformat()
-        config["startWeight"] = start_w or None
-        config["targetWeight"] = target_w or None
-        st.session_state.config = config
-        save_data(config, entries)
+        save_config({
+            "weighInDate": weigh_in.isoformat(),
+            "fightDate": fight.isoformat(),
+            "startWeight": start_w or None,
+            "targetWeight": target_w or None,
+        })
         st.success("保存しました")
         st.rerun()
     if st.button("🗑️ 全データを削除", type="secondary"):
-        st.session_state.config = dict(DEFAULT_CONFIG)
-        st.session_state.entries = []
-        save_data(DEFAULT_CONFIG, [])
+        delete_all_entries()
+        save_config(dict(DEFAULT_CONFIG))
         st.rerun()
 
 target = config.get("targetWeight")
 days_weighin = days_until(config.get("weighInDate"))
 days_fight = days_until(config.get("fightDate"))
 
-col1, col2 = st.columns(2)
-col1.metric("計量まで", f"{days_weighin}日" if days_weighin is not None else "—")
-col2.metric("試合まで", f"{days_fight}日" if days_fight is not None else "—")
+st.metric("計量まで", f"{days_weighin}日" if days_weighin is not None else "—")
+st.metric("試合まで", f"{days_fight}日" if days_fight is not None else "—")
 
 latest = entries[-1] if entries else None
 if latest:
     delta = round(latest["weight"] - target, 2) if target else None
-    c1, c2 = st.columns(2)
-    c1.metric("現在の体重", f"{latest['weight']:.2f} kg")
+    st.metric("現在の体重", f"{latest['weight']:.2f} kg")
     if delta is not None:
-        c2.metric("目標差", f"{'+' if delta > 0 else ''}{delta} kg")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("体脂肪率", f"{latest.get('bodyFat')}%" if latest.get("bodyFat") is not None else "—")
-    c2.metric("体水分率", f"{latest.get('bodyWater')}%" if latest.get("bodyWater") is not None else "—")
-    c3.metric("消費kcal", fmt_num(latest.get("calories")))
-    c4.metric("睡眠", fmt_sleep(latest.get("sleepHours")))
+        st.metric("目標差", f"{'+' if delta > 0 else ''}{delta} kg")
+    st.metric("体脂肪率", f"{latest.get('bodyFat')}%" if latest.get("bodyFat") is not None else "—")
+    st.metric("体水分率", f"{latest.get('bodyWater')}%" if latest.get("bodyWater") is not None else "—")
+    st.metric("消費kcal", fmt_num(latest.get("calories")))
+    st.metric("睡眠", fmt_sleep(latest.get("sleepHours")))
 
 st.subheader("項目別 推移")
 metric_options = {f"{m[1]}{f'（{m[2]}）' if m[2] else ''}": m[0] for m in METRICS}
@@ -592,9 +648,8 @@ if st.session_state.get("review_active"):
 
     st.markdown("#### 採用する値(表の「値」列は修正できます)")
 
-    c1, c2 = st.columns(2)
-    review_date = c1.date_input("日付", value=parse_date(review["merged"].get("date")) or date.today(), key="review_date")
-    review_time = c2.text_input("計測時刻 (任意, HH:MM)", value=review["merged"].get("time") or "", key="review_time")
+    review_date = st.date_input("日付", value=parse_date(review["merged"].get("date")) or date.today(), key="review_date")
+    review_time = st.text_input("計測時刻 (任意, HH:MM)", value=review["merged"].get("time") or "", key="review_time")
 
     table_rows = []
     for k in ALL_NUMERIC_KEYS + ["mbaRating", "targetHRRange"]:
@@ -622,14 +677,12 @@ if st.session_state.get("review_active"):
         key="review_editor",
     )
 
-    c1, c2 = st.columns(2)
-    review_skin = c1.select_slider("肌の状態", options=list(range(5)), format_func=lambda i: SKIN_LABELS[i], value=2, key="review_skin")
-    review_cond = c2.select_slider("コンディション", options=list(range(5)), format_func=lambda i: COND_LABELS[i], value=2, key="review_cond")
+    review_skin = st.select_slider("肌の状態", options=list(range(5)), format_func=lambda i: SKIN_LABELS[i], value=2, key="review_skin")
+    review_cond = st.select_slider("コンディション", options=list(range(5)), format_func=lambda i: COND_LABELS[i], value=2, key="review_cond")
     review_water = st.number_input("水分摂取 (ml・任意)", value=0.0, step=50.0, format="%.0f", key="review_water")
     review_notes = st.text_area("メモ (任意)", value="", key="review_notes")
 
-    c1, c2 = st.columns(2)
-    if c1.button("✅ この内容で記録する", type="primary"):
+    if st.button("✅ この内容で記録する", type="primary"):
         entry = {
             "date": review_date.isoformat(),
             "time": review_time or None,
@@ -655,57 +708,38 @@ if st.session_state.get("review_active"):
         if not entry.get("weight"):
             st.error("体重が読み取れていません。値を入力してから記録してください。")
         else:
-            entries = [e for e in entries if e["date"] != entry["date"]] + [entry]
-            entries.sort(key=lambda e: e["date"])
-            st.session_state.entries = entries
-            save_data(config, entries)
+            upsert_entry(entry)
             st.session_state.review_active = False
             del st.session_state["review"]
             st.success("記録しました")
             st.rerun()
-    if c2.button("キャンセル"):
+    if st.button("キャンセル"):
         st.session_state.review_active = False
         del st.session_state["review"]
         st.rerun()
 
 st.subheader("今日の記録(手動入力)")
 
-c1, c2 = st.columns(2)
-f_date = c1.date_input("日付", value=date.today(), key="f_date")
-f_time = c2.text_input("計測時刻 (任意, HH:MM)", value="")
-
-c1, c2 = st.columns(2)
-f_weight = c1.number_input("体重 (kg)", value=0.0, step=0.01, format="%.2f")
-f_bodyfat = c2.number_input("体脂肪率 (%・任意)", value=0.0, step=0.1, format="%.1f")
-
-c1, c2 = st.columns(2)
-f_bodywater = c1.number_input("体水分率 (%・任意)", value=0.0, step=0.1, format="%.1f")
-f_calories = c2.number_input("消費カロリー (kcal・任意)", value=0.0, step=1.0, format="%.0f")
-
-c1, c2 = st.columns(2)
-f_sleep_h = c1.number_input("睡眠時間 (時間・任意)", value=0.0, step=0.1, format="%.1f")
-f_sleep_score = c2.number_input("睡眠スコア (任意)", value=0.0, step=1.0, format="%.0f")
-
+f_date = st.date_input("日付", value=date.today(), key="f_date")
+f_time = st.text_input("計測時刻 (任意, HH:MM)", value="")
+f_weight = st.number_input("体重 (kg)", value=0.0, step=0.01, format="%.2f")
+f_bodyfat = st.number_input("体脂肪率 (%・任意)", value=0.0, step=0.1, format="%.1f")
+f_bodywater = st.number_input("体水分率 (%・任意)", value=0.0, step=0.1, format="%.1f")
+f_calories = st.number_input("消費カロリー (kcal・任意)", value=0.0, step=1.0, format="%.0f")
+f_sleep_h = st.number_input("睡眠時間 (時間・任意)", value=0.0, step=0.1, format="%.1f")
+f_sleep_score = st.number_input("睡眠スコア (任意)", value=0.0, step=1.0, format="%.0f")
 f_water = st.number_input("水分摂取 (ml・任意)", value=0.0, step=50.0, format="%.0f")
-
-c1, c2 = st.columns(2)
-f_skin = c1.select_slider("肌の状態", options=list(range(5)), format_func=lambda i: SKIN_LABELS[i], value=2)
-f_cond = c2.select_slider("コンディション", options=list(range(5)), format_func=lambda i: COND_LABELS[i], value=2)
+f_skin = st.select_slider("肌の状態", options=list(range(5)), format_func=lambda i: SKIN_LABELS[i], value=2)
+f_cond = st.select_slider("コンディション", options=list(range(5)), format_func=lambda i: COND_LABELS[i], value=2)
 
 advanced_values = {}
 with st.expander("体組成計の詳細項目"):
     for group in ADVANCED_GROUPS:
         st.markdown(f"**{group}**")
-        group_metrics = [m for m in ADVANCED_METRICS if m[3] == group]
-        for i in range(0, len(group_metrics), 2):
-            pair = group_metrics[i:i + 2]
-            cols = st.columns(2)
-            for col, m in zip(cols, pair):
-                key, label, unit, _ = m
-                advanced_values[key] = col.number_input(f"{label}{f' ({unit})' if unit else ''}", value=0.0, step=0.1, format="%.1f", key=f"adv_{key}")
-    c1, c2 = st.columns(2)
-    f_mba = c1.text_input("MBA判定 (任意)", value="")
-    f_hr_range = c2.text_input("運動時目標脈拍 (任意)", value="")
+        for key, label, unit, _ in [m for m in ADVANCED_METRICS if m[3] == group]:
+            advanced_values[key] = st.number_input(f"{label}{f' ({unit})' if unit else ''}", value=0.0, step=0.1, format="%.1f", key=f"adv_{key}")
+    f_mba = st.text_input("MBA判定 (任意)", value="")
+    f_hr_range = st.text_input("運動時目標脈拍 (任意)", value="")
 
 f_notes = st.text_area("メモ (任意)", value="")
 
@@ -730,10 +764,7 @@ if st.button("記録する", type="primary", disabled=(f_weight <= 0)):
         if k in BASIC_KEYS:
             continue
         entry[k] = advanced_values.get(k) or None
-    entries = [e for e in entries if e["date"] != entry["date"]] + [entry]
-    entries.sort(key=lambda e: e["date"])
-    st.session_state.entries = entries
-    save_data(config, entries)
+    upsert_entry(entry)
     st.success("記録しました")
     st.rerun()
 
@@ -741,28 +772,24 @@ if entries:
     st.subheader("履歴")
     for e in reversed(entries):
         with st.container(border=True):
-            c1, c2 = st.columns([5, 1])
-            with c1:
-                st.markdown(f"**{e['date']}{(' ' + e['time']) if e.get('time') else ''} — {e['weight']:.2f}kg**")
-                sub = f"肌:{SKIN_LABELS[e['skin']]} / コンディション:{COND_LABELS[e['cond']]}"
-                if e.get("water"):
-                    sub += f" / 水分:{e['water']}ml"
-                st.caption(sub)
-                extra_bits = []
-                if e.get("bodyFat") is not None:
-                    extra_bits.append(f"体脂肪:{e['bodyFat']}%")
-                if e.get("bodyWater") is not None:
-                    extra_bits.append(f"体水分:{e['bodyWater']}%")
-                if e.get("calories") is not None:
-                    extra_bits.append(f"消費:{fmt_num(e['calories'])}kcal")
-                if e.get("sleepHours") is not None:
-                    extra_bits.append(f"睡眠:{fmt_sleep(e['sleepHours'])}")
-                if extra_bits:
-                    st.caption(" / ".join(extra_bits))
-                if e.get("notes"):
-                    st.caption(f"_{e['notes']}_")
-            with c2:
-                if st.button("削除", key=f"del_{e['date']}"):
-                    st.session_state.entries = [x for x in entries if x["date"] != e["date"]]
-                    save_data(config, st.session_state.entries)
-                    st.rerun()
+            st.markdown(f"**{e['date']}{(' ' + e['time']) if e.get('time') else ''} — {e['weight']:.2f}kg**")
+            sub = f"肌:{SKIN_LABELS[e['skin']]} / コンディション:{COND_LABELS[e['cond']]}"
+            if e.get("water"):
+                sub += f" / 水分:{e['water']}ml"
+            st.caption(sub)
+            extra_bits = []
+            if e.get("bodyFat") is not None:
+                extra_bits.append(f"体脂肪:{e['bodyFat']}%")
+            if e.get("bodyWater") is not None:
+                extra_bits.append(f"体水分:{e['bodyWater']}%")
+            if e.get("calories") is not None:
+                extra_bits.append(f"消費:{fmt_num(e['calories'])}kcal")
+            if e.get("sleepHours") is not None:
+                extra_bits.append(f"睡眠:{fmt_sleep(e['sleepHours'])}")
+            if extra_bits:
+                st.caption(" / ".join(extra_bits))
+            if e.get("notes"):
+                st.caption(f"_{e['notes']}_")
+            if st.button("削除", key=f"del_{e['date']}"):
+                delete_entry(e["date"])
+                st.rerun()
