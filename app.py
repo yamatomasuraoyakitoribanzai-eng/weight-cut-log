@@ -613,19 +613,18 @@ def generate_pdf_report(config, entries):
     def pts(key):
         return [(parse_date(e["date"]), e.get(key)) for e in entries]
 
-    elements.append(Paragraph("体重・体脂肪率・体水分率 推移（各項目を独立スケールで表示）", h2_style))
+    elements.append(Paragraph("体重・体脂肪率 推移（各項目を独立スケールで表示）", h2_style))
     body_chart = build_multi_line_chart_drawing(
         [
             {"name": "体重", "points": pts("weight"), "color": "#D9A441", "unit": "kg", "is_weight": True},
             {"name": "体脂肪率", "points": pts("bodyFat"), "color": "#C1443C", "unit": "%"},
-            {"name": "体水分率", "points": pts("bodyWater"), "color": "#6E93B0", "unit": "%"},
         ],
         config, independent_scale=True,
     )
     if body_chart:
         elements.append(body_chart)
         elements.append(Paragraph(
-            "※ 3項目はスケールが大きく違うため、各項目を自身の最小〜最大でグラフ全体に引き伸ばしています。"
+            "※ 2項目はスケールが違うため、各項目を自身の最小〜最大でグラフ全体に引き伸ばしています。"
             "縦の位置ではなく「山と谷の形」で連動性を読んでください（実際の数値幅は凡例に記載）。",
             body_style))
     else:
@@ -769,67 +768,69 @@ def padded_range(vals, target_val=None):
     return [lo - pad, hi + pad]
 
 
-# ---- グラフ1: 体重・体脂肪率・体水分率 ----
-# 体重(約73kg)・体脂肪率(約15%)・体水分率(約61%)は数値の桁が違うため、共通の軸に載せると
-# 変動が潰れて直線に見えてしまう。そこで3項目それぞれに独立した軸を割り当て、各項目が
-# 縦幅いっぱいに広がるようにして「連動性(山と谷の形)」を読めるようにする。
-st.subheader("体重・体脂肪率・体水分率 推移")
+# ---- グラフ1: 体重・体脂肪率 ----
+# 体重(約73kg)と体脂肪率(約15%)は数値の桁が違うため、共通の軸に載せると変動が潰れて
+# 直線に見えてしまう。左右2軸に分け、それぞれが縦幅いっぱいに広がるようにして
+# 「連動性(山と谷の形)」を読めるようにする。
+st.subheader("体重・体脂肪率 推移")
 w_dates, w_vals = series_of("weight")
 bf_dates, bf_vals = series_of("bodyFat")
-bw_dates, bw_vals = series_of("bodyWater")
 
-if len(w_dates) + len(bf_dates) + len(bw_dates) >= 2:
+smooth = st.checkbox("7日移動平均で慣らして表示（日々のブレを消してトレンドを見る）", value=False)
+
+
+def moving_average(dates, vals, window=7):
+    """日々のブレを慣らすための単純移動平均。データが窓より少ない場合はそのまま返す。"""
+    if len(vals) < window:
+        return dates, vals
+    out_d, out_v = [], []
+    for i in range(window - 1, len(vals)):
+        out_d.append(dates[i])
+        out_v.append(sum(vals[i - window + 1:i + 1]) / window)
+    return out_d, out_v
+
+
+if len(w_dates) + len(bf_dates) >= 2:
     fig = go.Figure()
     layout_kwargs = {}
 
     if w_dates:
-        fig.add_trace(go.Scatter(x=w_dates, y=w_vals, mode="lines+markers", name="体重 (kg)",
-                                 line=dict(color="#D9A441", width=2.5), marker=dict(size=7), yaxis="y",
+        wd, wv = moving_average(w_dates, w_vals) if smooth else (w_dates, w_vals)
+        fig.add_trace(go.Scatter(x=wd, y=wv, mode="lines+markers", name="体重 (kg)",
+                                 line=dict(color="#D9A441", width=2.5), marker=dict(size=6), yaxis="y",
                                  hovertemplate="体重 %{y:.2f} kg<extra></extra>"))
         layout_kwargs["yaxis"] = dict(
             title=dict(text="体重 (kg)", font=dict(color="#D9A441")),
             tickfont=dict(color="#D9A441"),
-            range=padded_range(w_vals, target if target else None),
+            range=padded_range(wv, target if target else None),
         )
     if bf_dates:
-        fig.add_trace(go.Scatter(x=bf_dates, y=bf_vals, mode="lines+markers", name="体脂肪率 (%)",
-                                 line=dict(color="#C1443C", width=2), marker=dict(size=6), yaxis="y2",
+        bd, bv = moving_average(bf_dates, bf_vals) if smooth else (bf_dates, bf_vals)
+        fig.add_trace(go.Scatter(x=bd, y=bv, mode="lines+markers", name="体脂肪率 (%)",
+                                 line=dict(color="#C1443C", width=2.5), marker=dict(size=6), yaxis="y2",
                                  hovertemplate="体脂肪率 %{y:.1f} %<extra></extra>"))
         layout_kwargs["yaxis2"] = dict(
             title=dict(text="体脂肪率 (%)", font=dict(color="#C1443C")),
             tickfont=dict(color="#C1443C"),
             overlaying="y", side="right", showgrid=False,
-            range=padded_range(bf_vals),
+            range=padded_range(bv),
         )
-    if bw_dates:
-        fig.add_trace(go.Scatter(x=bw_dates, y=bw_vals, mode="lines+markers", name="体水分率 (%)",
-                                 line=dict(color="#6E93B0", width=2), marker=dict(size=6), yaxis="y3",
-                                 hovertemplate="体水分率 %{y:.1f} %<extra></extra>"))
-        layout_kwargs["yaxis3"] = dict(
-            title=dict(text="体水分率 (%)", font=dict(color="#6E93B0")),
-            tickfont=dict(color="#6E93B0"),
-            overlaying="y", side="right", anchor="free", position=1.0, showgrid=False,
-            range=padded_range(bw_vals),
-        )
-        # 3本目の軸を置くぶん、描画領域を左に詰める
-        layout_kwargs["xaxis"] = dict(domain=[0.0, 0.86])
 
     if target and w_dates:
         fig.add_hline(y=target, line_dash="dash", line_color="#6B9080",
                       annotation_text=f"目標体重 {target}kg", annotation_font_color="#6B9080")
     add_event_lines(fig)
     fig.update_layout(
-        height=460, margin=dict(l=10, r=10, t=70, b=10),
+        height=440, margin=dict(l=10, r=10, t=70, b=10),
         showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="left", x=0),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.28, xanchor="left", x=0),
         hovermode="x unified",
         xaxis_title=None,
         **layout_kwargs,
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
-        "3項目は数値の桁が違うため、**それぞれ独立した軸**で表示しています"
-        "(体重=左軸・オレンジ / 体脂肪率=右軸・赤 / 体水分率=右端・青)。"
+        "体重=左軸(オレンジ) / 体脂肪率=右軸(赤)。桁が違うため軸を分けています。"
         "縦の位置ではなく「山と谷の形」を見比べると連動性が分かります。"
     )
 else:
