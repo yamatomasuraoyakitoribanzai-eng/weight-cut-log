@@ -378,12 +378,16 @@ def extract_from_image(api_key, image_bytes, media_type):
 
 
 def build_multi_line_chart_drawing(series, config, width=460, height=175,
-                                   left_unit="", right_unit="", left_step=None):
+                                   left_unit="", independent_scale=False, left_step=None):
     """複数系列の折れ線グラフをreportlab.graphicsのみで描画する。
 
     series: [{"name": 表示名, "points": [(date, value), ...], "color": "#RRGGBB",
-              "axis": "left" または "right"}, ...]
-    スケールが違う系列(kgと%など)を同時に見るため、左右2軸に分けて描画する。
+              "unit": "kg" など}, ...]
+
+    independent_scale=True のとき、各系列を「その系列自身の最小〜最大」でグラフの縦幅いっぱいに
+    引き伸ばして描く。体重(約73kg)と体脂肪率(約15%)と体水分率(約61%)のようにスケールが
+    まったく違う値を1枚で比べるための措置。絶対値は縦軸では読めなくなるので、代わりに凡例へ
+    各系列の実際のレンジ(例: 体重 71.9-74.3kg)を併記して情報が失われないようにする。
 
     matplotlib/kaleidoは使わない。理由は、それらはレンダリング時にシステムの日本語フォントに
     依存するため、フォントが無い実行環境だと文字化けするため。reportlab.graphicsのStringは
@@ -405,7 +409,6 @@ def build_multi_line_chart_drawing(series, config, width=460, height=175,
     target = config.get("targetWeight")
     weigh_in_d = parse_date(config.get("weighInDate"))
     fight_d = parse_date(config.get("fightDate"))
-    has_weight = any(s.get("is_weight") for s in clean)
 
     all_dates = [d for s in clean for d, _ in s["points"]]
     if weigh_in_d:
@@ -417,67 +420,61 @@ def build_multi_line_chart_drawing(series, config, width=460, height=175,
         x_max = x_min + timedelta(days=1)
     x_span_days = max((x_max - x_min).days, 1)
 
-    def axis_range(which, extra=()):
-        vals = [v for s in clean if s.get("axis", "left") == which for _, v in s["points"]]
-        vals.extend(extra)
-        if not vals:
-            return None
-        pad = max((max(vals) - min(vals)) * 0.18, 1)
-        lo = math.floor(min(vals) - pad)
-        hi = math.ceil(max(vals) + pad)
-        return lo, max(hi, lo + 1)
+    def make_range(vals):
+        pad = max((max(vals) - min(vals)) * 0.18, 0.2)
+        lo, hi = min(vals) - pad, max(vals) + pad
+        return lo, (hi if hi > lo else lo + 1)
 
-    left_extra = [target] if (target and has_weight) else []
-    left_rng = axis_range("left", left_extra)
-    right_rng = axis_range("right")
+    # 系列ごとのスケール決定
+    for s in clean:
+        vals = [v for _, v in s["points"]]
+        if independent_scale:
+            if s.get("is_weight") and target:
+                vals = vals + [target]
+            s["rng"] = make_range(vals)
+        s["vmin"], s["vmax"] = min(v for _, v in s["points"]), max(v for _, v in s["points"])
 
-    margin_left = 34
-    margin_right = 34 if right_rng else 12
-    margin_bottom, margin_top = 22, 34
+    if not independent_scale:
+        shared_vals = [v for s in clean for _, v in s["points"]]
+        if target and any(s.get("is_weight") for s in clean):
+            shared_vals.append(target)
+        shared_rng = make_range(shared_vals)
+        for s in clean:
+            s["rng"] = shared_rng
+
+    # 凡例の行数を先に決めてから上マージンを確保する
+    legend_rows = 1 if len(clean) <= 2 else 2
+    margin_left = 12 if independent_scale else 38
+    margin_right = 12
+    margin_bottom = 22
+    margin_top = 26 + legend_rows * 9
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
 
     def xpos(d):
         return margin_left + (d - x_min).days / x_span_days * plot_w
 
-    def ypos(v, which):
-        rng = left_rng if which == "left" else right_rng
+    def ypos(v, rng):
         lo, hi = rng
         return margin_bottom + (v - lo) / (hi - lo) * plot_h
 
     d = Drawing(width, height)
     d.add(Line(margin_left, margin_bottom, margin_left, height - margin_top, strokeColor=rl_colors.grey))
     d.add(Line(margin_left, margin_bottom, width - margin_right, margin_bottom, strokeColor=rl_colors.grey))
-    if right_rng:
-        d.add(Line(width - margin_right, margin_bottom, width - margin_right, height - margin_top, strokeColor=rl_colors.grey))
 
-    # 左軸目盛り
-    if left_rng:
-        lo, hi = left_rng
+    # 共通スケールのときだけ縦軸に数値を出す(独立スケールでは数値に意味がないため出さない)
+    if not independent_scale:
+        lo, hi = clean[0]["rng"]
         step = left_step or max(1, round((hi - lo) / 5))
-        tick = lo
+        tick = math.ceil(lo)
         while tick <= hi:
-            y = ypos(tick, "left")
+            y = ypos(tick, clean[0]["rng"])
             d.add(Line(margin_left - 3, y, margin_left, y, strokeColor=rl_colors.grey))
             d.add(String(margin_left - 5, y - 2, f"{tick:,.0f}", fontName=FONT, fontSize=5, textAnchor="end"))
             tick += step
         if left_unit:
             d.add(String(margin_left - 5, height - margin_top + 3, left_unit, fontName=FONT, fontSize=5,
                          fillColor=rl_colors.grey, textAnchor="end"))
-
-    # 右軸目盛り
-    if right_rng:
-        lo, hi = right_rng
-        step = max(1, round((hi - lo) / 5))
-        tick = lo
-        while tick <= hi:
-            y = ypos(tick, "right")
-            d.add(Line(width - margin_right, y, width - margin_right + 3, y, strokeColor=rl_colors.grey))
-            d.add(String(width - margin_right + 5, y - 2, f"{tick:,.0f}", fontName=FONT, fontSize=5, textAnchor="start"))
-            tick += step
-        if right_unit:
-            d.add(String(width - margin_right + 5, height - margin_top + 3, right_unit, fontName=FONT, fontSize=5,
-                         fillColor=rl_colors.grey, textAnchor="start"))
 
     # X軸目盛り
     for i in range(6):
@@ -486,12 +483,16 @@ def build_multi_line_chart_drawing(series, config, width=460, height=175,
         d.add(Line(x, margin_bottom, x, margin_bottom - 3, strokeColor=rl_colors.grey))
         d.add(String(x, margin_bottom - 11, f"{tick_date.month}/{tick_date.day}", fontName=FONT, fontSize=5, textAnchor="middle"))
 
-    # 目標体重ライン(体重系列があるときのみ)
-    if target and has_weight and left_rng:
-        y = ypos(target, "left")
-        d.add(Line(margin_left, y, width - margin_right, y, strokeColor=rl_colors.HexColor("#6B9080"),
-                   strokeWidth=1, strokeDashArray=[3, 2]))
-        d.add(String(margin_left + 2, y + 2, "目標体重", fontName=FONT, fontSize=5, fillColor=rl_colors.HexColor("#6B9080")))
+    # 目標体重ライン(体重系列のスケール上に引く)
+    w_series = next((s for s in clean if s.get("is_weight")), None)
+    if target and w_series:
+        lo, hi = w_series["rng"]
+        if lo <= target <= hi:
+            y = ypos(target, w_series["rng"])
+            d.add(Line(margin_left, y, width - margin_right, y, strokeColor=rl_colors.HexColor("#6B9080"),
+                       strokeWidth=1, strokeDashArray=[3, 2]))
+            d.add(String(margin_left + 2, y + 2, f"目標体重 {target}kg", fontName=FONT, fontSize=5,
+                         fillColor=rl_colors.HexColor("#6B9080")))
 
     # 計量日・試合日(ラベルは上下2段+左右にずらして重なりを防ぐ)
     if weigh_in_d:
@@ -509,25 +510,29 @@ def build_multi_line_chart_drawing(series, config, width=460, height=175,
 
     # 各系列
     for s in clean:
-        which = s.get("axis", "left")
-        pts = s["points"]
+        pts, rng = s["points"], s["rng"]
         col = rl_colors.HexColor(s["color"])
         for i in range(len(pts) - 1):
-            d.add(Line(xpos(pts[i][0]), ypos(pts[i][1], which),
-                       xpos(pts[i + 1][0]), ypos(pts[i + 1][1], which),
+            d.add(Line(xpos(pts[i][0]), ypos(pts[i][1], rng),
+                       xpos(pts[i + 1][0]), ypos(pts[i + 1][1], rng),
                        strokeColor=col, strokeWidth=1.6))
         for dt, v in pts:
-            d.add(Circle(xpos(dt), ypos(v, which), 1.8, fillColor=col, strokeColor=None))
+            d.add(Circle(xpos(dt), ypos(v, rng), 1.8, fillColor=col, strokeColor=None))
 
-    # 凡例(グラフ上部)
-    lx = margin_left
-    ly = height - 9
-    for s in clean:
+    # 凡例(独立スケールのときは各系列の実レンジも併記する)
+    lx, ly = margin_left, height - 10
+    for i, s in enumerate(clean):
+        if legend_rows == 2 and i == 2:
+            lx, ly = margin_left, ly - 9
         col = rl_colors.HexColor(s["color"])
         d.add(Rect(lx, ly, 8, 3, fillColor=col, strokeColor=None))
-        label = s["name"] + ("" if s.get("axis", "left") == "left" else " (右軸)")
+        unit = s.get("unit", "")
+        if independent_scale:
+            label = f'{s["name"]} {s["vmin"]:.1f}-{s["vmax"]:.1f}{unit}'
+        else:
+            label = s["name"]
         d.add(String(lx + 11, ly - 1, label, fontName=FONT, fontSize=5.5))
-        lx += 11 + len(label) * 5.2 + 10
+        lx += 11 + len(label) * 5.4 + 10
 
     return d
 
@@ -608,30 +613,38 @@ def generate_pdf_report(config, entries):
     def pts(key):
         return [(parse_date(e["date"]), e.get(key)) for e in entries]
 
-    elements.append(Paragraph("体重・体脂肪率・体水分率 推移", h2_style))
+    elements.append(Paragraph("体重・体脂肪率・体水分率 推移（各項目を独立スケールで表示）", h2_style))
     body_chart = build_multi_line_chart_drawing(
         [
-            {"name": "体重", "points": pts("weight"), "color": "#D9A441", "axis": "left", "is_weight": True},
-            {"name": "体脂肪率", "points": pts("bodyFat"), "color": "#C1443C", "axis": "right"},
-            {"name": "体水分率", "points": pts("bodyWater"), "color": "#6E93B0", "axis": "right"},
+            {"name": "体重", "points": pts("weight"), "color": "#D9A441", "unit": "kg", "is_weight": True},
+            {"name": "体脂肪率", "points": pts("bodyFat"), "color": "#C1443C", "unit": "%"},
+            {"name": "体水分率", "points": pts("bodyWater"), "color": "#6E93B0", "unit": "%"},
         ],
-        config, left_unit="kg", right_unit="%", left_step=1,
+        config, independent_scale=True,
     )
     if body_chart:
         elements.append(body_chart)
+        elements.append(Paragraph(
+            "※ 3項目はスケールが大きく違うため、各項目を自身の最小〜最大でグラフ全体に引き伸ばしています。"
+            "縦の位置ではなく「山と谷の形」で連動性を読んでください（実際の数値幅は凡例に記載）。",
+            body_style))
     else:
         elements.append(Paragraph("グラフを表示するには体重などの記録が1件以上必要です。", body_style))
 
     elements.append(Paragraph("摂取カロリー・消費カロリー 推移", h2_style))
     cal_chart = build_multi_line_chart_drawing(
         [
-            {"name": "摂取カロリー", "points": pts("intakeCalories"), "color": "#6B9080", "axis": "left"},
-            {"name": "消費カロリー", "points": pts("calories"), "color": "#D9A441", "axis": "left"},
+            {"name": "摂取カロリー", "points": pts("intakeCalories"), "color": "#6B9080", "unit": "kcal"},
+            {"name": "消費カロリー", "points": pts("calories"), "color": "#D9A441", "unit": "kcal"},
         ],
         config, left_unit="kcal",
     )
     if cal_chart:
         elements.append(cal_chart)
+        missing = [n for n, k in (("摂取カロリー", "intakeCalories"), ("消費カロリー", "calories"))
+                   if not any(e.get(k) is not None for e in entries)]
+        if missing:
+            elements.append(Paragraph(f"※ {'・'.join(missing)}のデータが未入力のため、線は1本のみ表示されています。", body_style))
     else:
         elements.append(Paragraph("グラフを表示するには、摂取カロリーまたは消費カロリーの記録が1件以上必要です。", body_style))
 
@@ -746,7 +759,20 @@ def series_of(key):
     return [parse_date(e["date"]) for e in picked], [e[key] for e in picked]
 
 
-# ---- グラフ1: 体重・体脂肪率・体水分率(スケールが違うので左右2軸) ----
+def padded_range(vals, target_val=None):
+    """系列を縦幅いっぱいに広げるための表示レンジを返す。"""
+    v = list(vals)
+    if target_val is not None:
+        v.append(target_val)
+    lo, hi = min(v), max(v)
+    pad = max((hi - lo) * 0.18, 0.2)
+    return [lo - pad, hi + pad]
+
+
+# ---- グラフ1: 体重・体脂肪率・体水分率 ----
+# 体重(約73kg)・体脂肪率(約15%)・体水分率(約61%)は数値の桁が違うため、共通の軸に載せると
+# 変動が潰れて直線に見えてしまう。そこで3項目それぞれに独立した軸を割り当て、各項目が
+# 縦幅いっぱいに広がるようにして「連動性(山と谷の形)」を読めるようにする。
 st.subheader("体重・体脂肪率・体水分率 推移")
 w_dates, w_vals = series_of("weight")
 bf_dates, bf_vals = series_of("bodyFat")
@@ -754,27 +780,58 @@ bw_dates, bw_vals = series_of("bodyWater")
 
 if len(w_dates) + len(bf_dates) + len(bw_dates) >= 2:
     fig = go.Figure()
+    layout_kwargs = {}
+
     if w_dates:
         fig.add_trace(go.Scatter(x=w_dates, y=w_vals, mode="lines+markers", name="体重 (kg)",
-                                 line=dict(color="#D9A441", width=2), marker=dict(size=7), yaxis="y"))
+                                 line=dict(color="#D9A441", width=2.5), marker=dict(size=7), yaxis="y",
+                                 hovertemplate="体重 %{y:.2f} kg<extra></extra>"))
+        layout_kwargs["yaxis"] = dict(
+            title=dict(text="体重 (kg)", font=dict(color="#D9A441")),
+            tickfont=dict(color="#D9A441"),
+            range=padded_range(w_vals, target if target else None),
+        )
     if bf_dates:
         fig.add_trace(go.Scatter(x=bf_dates, y=bf_vals, mode="lines+markers", name="体脂肪率 (%)",
-                                 line=dict(color="#C1443C", width=2), marker=dict(size=6), yaxis="y2"))
+                                 line=dict(color="#C1443C", width=2), marker=dict(size=6), yaxis="y2",
+                                 hovertemplate="体脂肪率 %{y:.1f} %<extra></extra>"))
+        layout_kwargs["yaxis2"] = dict(
+            title=dict(text="体脂肪率 (%)", font=dict(color="#C1443C")),
+            tickfont=dict(color="#C1443C"),
+            overlaying="y", side="right", showgrid=False,
+            range=padded_range(bf_vals),
+        )
     if bw_dates:
         fig.add_trace(go.Scatter(x=bw_dates, y=bw_vals, mode="lines+markers", name="体水分率 (%)",
-                                 line=dict(color="#6E93B0", width=2), marker=dict(size=6), yaxis="y2"))
-    if target:
-        fig.add_hline(y=target, line_dash="dash", line_color="#6B9080", annotation_text="目標体重")
+                                 line=dict(color="#6E93B0", width=2), marker=dict(size=6), yaxis="y3",
+                                 hovertemplate="体水分率 %{y:.1f} %<extra></extra>"))
+        layout_kwargs["yaxis3"] = dict(
+            title=dict(text="体水分率 (%)", font=dict(color="#6E93B0")),
+            tickfont=dict(color="#6E93B0"),
+            overlaying="y", side="right", anchor="free", position=1.0, showgrid=False,
+            range=padded_range(bw_vals),
+        )
+        # 3本目の軸を置くぶん、描画領域を左に詰める
+        layout_kwargs["xaxis"] = dict(domain=[0.0, 0.86])
+
+    if target and w_dates:
+        fig.add_hline(y=target, line_dash="dash", line_color="#6B9080",
+                      annotation_text=f"目標体重 {target}kg", annotation_font_color="#6B9080")
     add_event_lines(fig)
     fig.update_layout(
-        height=420, margin=dict(l=10, r=10, t=70, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
-        yaxis=dict(title="kg", dtick=1),
-        yaxis2=dict(title="%", overlaying="y", side="right"),
+        height=460, margin=dict(l=10, r=10, t=70, b=10),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="left", x=0),
+        hovermode="x unified",
         xaxis_title=None,
+        **layout_kwargs,
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("左軸=体重(kg) / 右軸=体脂肪率・体水分率(%)。スケールが違うため2軸に分けています。")
+    st.caption(
+        "3項目は数値の桁が違うため、**それぞれ独立した軸**で表示しています"
+        "(体重=左軸・オレンジ / 体脂肪率=右軸・赤 / 体水分率=右端・青)。"
+        "縦の位置ではなく「山と谷の形」を見比べると連動性が分かります。"
+    )
 else:
     st.info("このグラフを表示するには記録があと数件必要です。")
 
@@ -787,18 +844,35 @@ if len(in_dates) + len(out_dates) >= 2:
     fig2 = go.Figure()
     if in_dates:
         fig2.add_trace(go.Scatter(x=in_dates, y=in_vals, mode="lines+markers", name="摂取カロリー",
-                                  line=dict(color="#6B9080", width=2), marker=dict(size=7)))
+                                  line=dict(color="#6B9080", width=2.5), marker=dict(size=7),
+                                  hovertemplate="摂取 %{y:,.0f} kcal<extra></extra>"))
     if out_dates:
         fig2.add_trace(go.Scatter(x=out_dates, y=out_vals, mode="lines+markers", name="消費カロリー",
-                                  line=dict(color="#D9A441", width=2), marker=dict(size=7)))
+                                  line=dict(color="#D9A441", width=2.5), marker=dict(size=7),
+                                  hovertemplate="消費 %{y:,.0f} kcal<extra></extra>"))
     add_event_lines(fig2)
+    # 線が1本のときPlotlyは凡例を自動で隠してしまうので、明示的に常時表示する
     fig2.update_layout(
-        height=420, margin=dict(l=10, r=10, t=70, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+        height=460, margin=dict(l=10, r=10, t=70, b=10),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="left", x=0),
+        hovermode="x unified",
         yaxis_title="kcal", xaxis_title=None,
     )
     st.plotly_chart(fig2, use_container_width=True)
-    st.caption("2本の線の差がカロリー収支です（摂取が下なら減量方向）。")
+
+    missing = []
+    if not in_dates:
+        missing.append("摂取カロリー")
+    if not out_dates:
+        missing.append("消費カロリー")
+    if missing:
+        st.warning(
+            f"⚠️ {'・'.join(missing)}のデータがまだ1件も入っていないため、線が1本だけになっています。"
+            "下の「今日の記録(手動入力)」または画像取り込みで入力すると2本表示されます。"
+        )
+    else:
+        st.caption("2本の線の差がカロリー収支です（摂取が下なら減量方向）。")
 else:
     st.info("このグラフを表示するには、摂取カロリーまたは消費カロリーの記録があと数件必要です。")
 
