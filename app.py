@@ -9,9 +9,8 @@ Claude Artifact (React) から移植した減量・コンディション管理�
 .streamlit/secrets.toml に以下を設定してください:
     SUPABASE_URL = "https://xxxx.supabase.co"
     SUPABASE_KEY = "sb_publishable_xxxx"
-
-画像自動入力機能を使う場合は、Anthropic APIキーが必要です(画面で入力するか、
-環境変数 ANTHROPIC_API_KEY を設定してください)。
+    APP_PASSWORD = "好きなパスワード"
+    ANTHROPIC_API_KEY = "sk-ant-xxxx"
 """
 
 import base64
@@ -41,6 +40,7 @@ METRICS = [
     ("weight", "体重", "kg", "基本"),
     ("bodyFat", "体脂肪率", "%", "基本"),
     ("bodyWater", "体水分率", "%", "基本"),
+    ("intakeCalories", "摂取カロリー", "kcal", "基本"),
     ("calories", "消費カロリー", "kcal", "基本"),
     ("sleepHours", "睡眠時間", "h", "基本"),
     ("sleepScore", "睡眠スコア", "", "基本"),
@@ -76,6 +76,9 @@ ALL_NUMERIC_KEYS = [m[0] for m in METRICS]
 
 TABLE_EXTRA_LABELS = {"mbaRating": ("MBA判定", ""), "targetHRRange": ("運動時目標脈拍", "")}
 
+# weight_logsテーブルのネイティブ列に対応するエントリーキー。
+# これ以外のキー(睡眠・カロリー・肌/コンディション・MBA・部位別データ等)は
+# extra(jsonb)列にまとめて保存する。
 NATIVE_KEYS = {"date", "weight", "bodyFat", "muscleMass", "bodyWater", "notes"}
 
 
@@ -105,6 +108,7 @@ def get_supabase():
             )
             st.stop()
     return create_client(url, key)
+
 
 def _row_to_entry(row):
     entry = {
@@ -144,17 +148,14 @@ def upsert_entry(entry):
     try:
         sb.table("weight_logs").upsert(row, on_conflict="measure_date").execute()
     except APIError as e:
-        st.error(
-            "記録の保存に失敗しました(APIError)。\n\n"
-            f"message: {e.message}\n"
-            f"code: {getattr(e, 'code', None)}\n"
-            f"details: {getattr(e, 'details', None)}\n"
-            f"hint: {getattr(e, 'hint', None)}"
-        )
+        st.error("記録の保存に失敗しました(APIError)。\n\n"
+                 f"message: {e.message}\ncode: {getattr(e, 'code', None)}\n"
+                 f"details: {getattr(e, 'details', None)}\nhint: {getattr(e, 'hint', None)}")
         st.stop()
     except Exception as e:
         st.error(f"記録の保存に失敗しました: {e}")
         st.stop()
+
 
 def delete_entry(d):
     from postgrest.exceptions import APIError
@@ -163,13 +164,9 @@ def delete_entry(d):
     try:
         sb.table("weight_logs").delete().eq("measure_date", d).execute()
     except APIError as e:
-        st.error(
-            "記録の削除に失敗しました(APIError)。\n\n"
-            f"message: {e.message}\n"
-            f"code: {getattr(e, 'code', None)}\n"
-            f"details: {getattr(e, 'details', None)}\n"
-            f"hint: {getattr(e, 'hint', None)}"
-        )
+        st.error("記録の削除に失敗しました(APIError)。\n\n"
+                 f"message: {e.message}\ncode: {getattr(e, 'code', None)}\n"
+                 f"details: {getattr(e, 'details', None)}\nhint: {getattr(e, 'hint', None)}")
         st.stop()
     except Exception as e:
         st.error(f"記録の削除に失敗しました: {e}")
@@ -183,13 +180,9 @@ def delete_all_entries():
     try:
         sb.table("weight_logs").delete().gte("measure_date", "1900-01-01").execute()
     except APIError as e:
-        st.error(
-            "全データの削除に失敗しました(APIError)。\n\n"
-            f"message: {e.message}\n"
-            f"code: {getattr(e, 'code', None)}\n"
-            f"details: {getattr(e, 'details', None)}\n"
-            f"hint: {getattr(e, 'hint', None)}"
-        )
+        st.error("全データの削除に失敗しました(APIError)。\n\n"
+                 f"message: {e.message}\ncode: {getattr(e, 'code', None)}\n"
+                 f"details: {getattr(e, 'details', None)}\nhint: {getattr(e, 'hint', None)}")
         st.stop()
     except Exception as e:
         st.error(f"全データの削除に失敗しました: {e}")
@@ -265,13 +258,33 @@ def fmt_num(n):
     return f"{n:,.0f}"
 
 
+def calorie_balance(entry):
+    """カロリー収支 = 摂取カロリー - 消費カロリー。
+
+    どちらか一方でも未入力の日は計算できないので None を返す(0とは区別する)。
+    保存はせず、表示・グラフのたびにこの関数で計算する。
+    """
+    intake = entry.get("intakeCalories")
+    burned = entry.get("calories")
+    if intake is None or burned is None:
+        return None
+    return intake - burned
+
+
+def fmt_balance(v):
+    if v is None:
+        return "—"
+    return f"{'+' if v > 0 else ''}{v:,.0f} kcal"
+
+
 FIELD_HINTS = {
     "date": "計測日(画面上部の日付表記。例: 2026年07月06日、7月6日、7/6)",
     "time": "計測時刻(例: 10:21)",
     "weight": "体重",
     "bodyFat": "体脂肪率(全身。部位別ではなく合計値)",
     "bodyWater": "体水分率",
-    "calories": "消費カロリー、合計消費カロリー、アクティブカロリー",
+    "intakeCalories": "摂取カロリー(食事アプリ「あすけん」等の「摂取カロリー」タブに出る「合計 XXXX kcal」の数値。「目標 XXXX kcal」の方ではない)",
+    "calories": "消費カロリー、合計消費カロリー、アクティブカロリー(ヘルスケアアプリ側の消費側の数値)",
     "sleepHours": "睡眠時間(例: 7時間20分)",
     "sleepScore": "睡眠スコア、睡眠の質のスコア(例: 85 良い、のような数値)",
     "muscleMass": "筋肉量(全身合計。部位別の腕・脚・体幹ではない)",
@@ -364,22 +377,37 @@ def extract_from_image(api_key, image_bytes, media_type):
         return None, raw_text, f"JSON解析エラー: {e}"
 
 
-def build_weight_chart_drawing(entries, config, width=460, height=240):
-    from reportlab.graphics.shapes import Circle, Drawing, Line, String
+def build_multi_line_chart_drawing(series, config, width=460, height=175,
+                                   left_unit="", right_unit="", left_step=None):
+    """複数系列の折れ線グラフをreportlab.graphicsのみで描画する。
+
+    series: [{"name": 表示名, "points": [(date, value), ...], "color": "#RRGGBB",
+              "axis": "left" または "right"}, ...]
+    スケールが違う系列(kgと%など)を同時に見るため、左右2軸に分けて描画する。
+
+    matplotlib/kaleidoは使わない。理由は、それらはレンダリング時にシステムの日本語フォントに
+    依存するため、フォントが無い実行環境だと文字化けするため。reportlab.graphicsのStringは
+    PDF埋め込み済みのCIDフォントで描くので、実行環境に左右されない。
+    """
+    from reportlab.graphics.shapes import Circle, Drawing, Line, Rect, String
     from reportlab.lib import colors as rl_colors
 
     FONT = "HeiseiKakuGo-W5"
 
-    data = [(parse_date(e["date"]), e["weight"]) for e in entries if e.get("weight") is not None]
-    data.sort(key=lambda p: p[0])
-    if len(data) < 1:
+    clean = []
+    for s in series:
+        pts = sorted([(d, v) for d, v in s["points"] if d is not None and v is not None], key=lambda p: p[0])
+        if pts:
+            clean.append({**s, "points": pts})
+    if not clean:
         return None
 
     target = config.get("targetWeight")
     weigh_in_d = parse_date(config.get("weighInDate"))
     fight_d = parse_date(config.get("fightDate"))
+    has_weight = any(s.get("is_weight") for s in clean)
 
-    all_dates = [d for d, _ in data]
+    all_dates = [d for s in clean for d, _ in s["points"]]
     if weigh_in_d:
         all_dates.append(weigh_in_d)
     if fight_d:
@@ -389,65 +417,117 @@ def build_weight_chart_drawing(entries, config, width=460, height=240):
         x_max = x_min + timedelta(days=1)
     x_span_days = max((x_max - x_min).days, 1)
 
-    y_vals = [w for _, w in data]
-    if target:
-        y_vals.append(target)
-    y_min = math.floor(min(y_vals) - 1)
-    y_max = math.ceil(max(y_vals) + 1)
-    y_span = max(y_max - y_min, 1)
+    def axis_range(which, extra=()):
+        vals = [v for s in clean if s.get("axis", "left") == which for _, v in s["points"]]
+        vals.extend(extra)
+        if not vals:
+            return None
+        pad = max((max(vals) - min(vals)) * 0.18, 1)
+        lo = math.floor(min(vals) - pad)
+        hi = math.ceil(max(vals) + pad)
+        return lo, max(hi, lo + 1)
 
-    margin_left, margin_bottom, margin_top, margin_right = 32, 24, 40, 12
+    left_extra = [target] if (target and has_weight) else []
+    left_rng = axis_range("left", left_extra)
+    right_rng = axis_range("right")
+
+    margin_left = 34
+    margin_right = 34 if right_rng else 12
+    margin_bottom, margin_top = 22, 34
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
 
     def xpos(d):
         return margin_left + (d - x_min).days / x_span_days * plot_w
 
-    def ypos(v):
-        return margin_bottom + (v - y_min) / y_span * plot_h
+    def ypos(v, which):
+        rng = left_rng if which == "left" else right_rng
+        lo, hi = rng
+        return margin_bottom + (v - lo) / (hi - lo) * plot_h
 
     d = Drawing(width, height)
-
     d.add(Line(margin_left, margin_bottom, margin_left, height - margin_top, strokeColor=rl_colors.grey))
     d.add(Line(margin_left, margin_bottom, width - margin_right, margin_bottom, strokeColor=rl_colors.grey))
+    if right_rng:
+        d.add(Line(width - margin_right, margin_bottom, width - margin_right, height - margin_top, strokeColor=rl_colors.grey))
 
-    y_tick = y_min
-    while y_tick <= y_max:
-        y = ypos(y_tick)
-        d.add(Line(margin_left - 3, y, margin_left, y, strokeColor=rl_colors.grey))
-        d.add(String(margin_left - 5, y - 2.5, f"{y_tick:.0f}", fontName=FONT, fontSize=6, textAnchor="end"))
-        y_tick += 1
+    # 左軸目盛り
+    if left_rng:
+        lo, hi = left_rng
+        step = left_step or max(1, round((hi - lo) / 5))
+        tick = lo
+        while tick <= hi:
+            y = ypos(tick, "left")
+            d.add(Line(margin_left - 3, y, margin_left, y, strokeColor=rl_colors.grey))
+            d.add(String(margin_left - 5, y - 2, f"{tick:,.0f}", fontName=FONT, fontSize=5, textAnchor="end"))
+            tick += step
+        if left_unit:
+            d.add(String(margin_left - 5, height - margin_top + 3, left_unit, fontName=FONT, fontSize=5,
+                         fillColor=rl_colors.grey, textAnchor="end"))
 
-    n_ticks = 5
-    for i in range(n_ticks + 1):
-        tick_date = x_min + timedelta(days=round(i / n_ticks * x_span_days))
+    # 右軸目盛り
+    if right_rng:
+        lo, hi = right_rng
+        step = max(1, round((hi - lo) / 5))
+        tick = lo
+        while tick <= hi:
+            y = ypos(tick, "right")
+            d.add(Line(width - margin_right, y, width - margin_right + 3, y, strokeColor=rl_colors.grey))
+            d.add(String(width - margin_right + 5, y - 2, f"{tick:,.0f}", fontName=FONT, fontSize=5, textAnchor="start"))
+            tick += step
+        if right_unit:
+            d.add(String(width - margin_right + 5, height - margin_top + 3, right_unit, fontName=FONT, fontSize=5,
+                         fillColor=rl_colors.grey, textAnchor="start"))
+
+    # X軸目盛り
+    for i in range(6):
+        tick_date = x_min + timedelta(days=round(i / 5 * x_span_days))
         x = xpos(tick_date)
         d.add(Line(x, margin_bottom, x, margin_bottom - 3, strokeColor=rl_colors.grey))
-        d.add(String(x, margin_bottom - 13, f"{tick_date.month}/{tick_date.day}", fontName=FONT, fontSize=6, textAnchor="middle"))
+        d.add(String(x, margin_bottom - 11, f"{tick_date.month}/{tick_date.day}", fontName=FONT, fontSize=5, textAnchor="middle"))
 
-    if target:
-        y = ypos(target)
-        d.add(Line(margin_left, y, width - margin_right, y, strokeColor=rl_colors.HexColor("#6B9080"), strokeWidth=1, strokeDashArray=[3, 2]))
-        d.add(String(margin_left + 2, y + 2, "目標体重", fontName=FONT, fontSize=6, fillColor=rl_colors.HexColor("#6B9080")))
+    # 目標体重ライン(体重系列があるときのみ)
+    if target and has_weight and left_rng:
+        y = ypos(target, "left")
+        d.add(Line(margin_left, y, width - margin_right, y, strokeColor=rl_colors.HexColor("#6B9080"),
+                   strokeWidth=1, strokeDashArray=[3, 2]))
+        d.add(String(margin_left + 2, y + 2, "目標体重", fontName=FONT, fontSize=5, fillColor=rl_colors.HexColor("#6B9080")))
 
+    # 計量日・試合日(ラベルは上下2段+左右にずらして重なりを防ぐ)
     if weigh_in_d:
         x = xpos(weigh_in_d)
-        d.add(Line(x, margin_bottom, x, height - margin_top, strokeColor=rl_colors.HexColor("#6E93B0"), strokeWidth=1, strokeDashArray=[3, 2]))
-        d.add(String(x - 2, height - margin_top + 20, f"計量日 {weigh_in_d.month}/{weigh_in_d.day}", fontName=FONT, fontSize=6,
-                     fillColor=rl_colors.HexColor("#6E93B0"), textAnchor="end"))
+        d.add(Line(x, margin_bottom, x, height - margin_top, strokeColor=rl_colors.HexColor("#6E93B0"),
+                   strokeWidth=1, strokeDashArray=[3, 2]))
+        d.add(String(x - 2, height - margin_top + 12, f"計量日 {weigh_in_d.month}/{weigh_in_d.day}", fontName=FONT,
+                     fontSize=5, fillColor=rl_colors.HexColor("#6E93B0"), textAnchor="end"))
     if fight_d:
         x = xpos(fight_d)
-        d.add(Line(x, margin_bottom, x, height - margin_top, strokeColor=rl_colors.HexColor("#C1443C"), strokeWidth=1, strokeDashArray=[3, 2]))
-        d.add(String(x + 2, height - margin_top + 8, f"試合日 {fight_d.month}/{fight_d.day}", fontName=FONT, fontSize=6,
-                     fillColor=rl_colors.HexColor("#C1443C"), textAnchor="start"))
+        d.add(Line(x, margin_bottom, x, height - margin_top, strokeColor=rl_colors.HexColor("#C1443C"),
+                   strokeWidth=1, strokeDashArray=[3, 2]))
+        d.add(String(x + 2, height - margin_top + 3, f"試合日 {fight_d.month}/{fight_d.day}", fontName=FONT,
+                     fontSize=5, fillColor=rl_colors.HexColor("#C1443C"), textAnchor="start"))
 
-    for i in range(len(data) - 1):
-        x1, y1 = xpos(data[i][0]), ypos(data[i][1])
-        x2, y2 = xpos(data[i + 1][0]), ypos(data[i + 1][1])
-        d.add(Line(x1, y1, x2, y2, strokeColor=rl_colors.HexColor("#D9A441"), strokeWidth=2))
-    for dt, w in data:
-        x, y = xpos(dt), ypos(w)
-        d.add(Circle(x, y, 2, fillColor=rl_colors.HexColor("#D9A441"), strokeColor=None))
+    # 各系列
+    for s in clean:
+        which = s.get("axis", "left")
+        pts = s["points"]
+        col = rl_colors.HexColor(s["color"])
+        for i in range(len(pts) - 1):
+            d.add(Line(xpos(pts[i][0]), ypos(pts[i][1], which),
+                       xpos(pts[i + 1][0]), ypos(pts[i + 1][1], which),
+                       strokeColor=col, strokeWidth=1.6))
+        for dt, v in pts:
+            d.add(Circle(xpos(dt), ypos(v, which), 1.8, fillColor=col, strokeColor=None))
+
+    # 凡例(グラフ上部)
+    lx = margin_left
+    ly = height - 9
+    for s in clean:
+        col = rl_colors.HexColor(s["color"])
+        d.add(Rect(lx, ly, 8, 3, fillColor=col, strokeColor=None))
+        label = s["name"] + ("" if s.get("axis", "left") == "left" else " (右軸)")
+        d.add(String(lx + 11, ly - 1, label, fontName=FONT, fontSize=5.5))
+        lx += 11 + len(label) * 5.2 + 10
 
     return d
 
@@ -464,11 +544,25 @@ def generate_pdf_report(config, entries):
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
 
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm)
-    title_style = ParagraphStyle("title", fontName="HeiseiKakuGo-W5", fontSize=18, spaceAfter=4)
-    sub_style = ParagraphStyle("sub", fontName="HeiseiKakuGo-W5", fontSize=9, textColor=colors.grey, spaceAfter=14)
-    h2_style = ParagraphStyle("h2", fontName="HeiseiKakuGo-W5", fontSize=13, spaceBefore=10, spaceAfter=6)
-    body_style = ParagraphStyle("body", fontName="HeiseiKakuGo-W5", fontSize=9)
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=15 * mm, bottomMargin=15 * mm,
+                            leftMargin=18 * mm, rightMargin=18 * mm)
+    # leadingを明示しないと行の高さが足りず、タイトルと出力日時が重なることがある
+    title_style = ParagraphStyle("title", fontName="HeiseiKakuGo-W5", fontSize=16, leading=22, spaceAfter=2)
+    sub_style = ParagraphStyle("sub", fontName="HeiseiKakuGo-W5", fontSize=8, leading=12,
+                               textColor=colors.grey, spaceAfter=10)
+    h2_style = ParagraphStyle("h2", fontName="HeiseiKakuGo-W5", fontSize=11, leading=15,
+                              spaceBefore=8, spaceAfter=4)
+    body_style = ParagraphStyle("body", fontName="HeiseiKakuGo-W5", fontSize=8, leading=11)
+
+    def table_style():
+        return TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "HeiseiKakuGo-W5"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ])
 
     elements = [
         Paragraph("減量・コンディション レポート", title_style),
@@ -485,13 +579,8 @@ def generate_pdf_report(config, entries):
         ["開始体重", f"{config.get('startWeight')} kg" if config.get("startWeight") else "—"],
         ["目標体重", f"{config.get('targetWeight')} kg" if config.get("targetWeight") else "—"],
     ]
-    t = Table(info_data, colWidths=[100, 300])
-    t.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, -1), "HeiseiKakuGo-W5"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
-    ]))
+    t = Table(info_data, colWidths=[95, 330])
+    t.setStyle(table_style())
     elements.append(t)
 
     latest = entries[-1] if entries else None
@@ -499,55 +588,52 @@ def generate_pdf_report(config, entries):
     if latest:
         target = config.get("targetWeight")
         delta = round(latest["weight"] - target, 2) if target else None
+        bal = calorie_balance(latest)
         status_data = [
             ["最終記録日", f"{latest['date']}" + (f" {latest['time']}" if latest.get("time") else "")],
             ["体重", f"{latest['weight']:.2f} kg" + (f"（目標差 {'+' if delta > 0 else ''}{delta}kg）" if delta is not None else "")],
-            ["体脂肪率", f"{latest.get('bodyFat', '—')}%" if latest.get("bodyFat") is not None else "—"],
-            ["体水分率", f"{latest.get('bodyWater', '—')}%" if latest.get("bodyWater") is not None else "—"],
+            ["体脂肪率", f"{latest.get('bodyFat')}%" if latest.get("bodyFat") is not None else "—"],
+            ["体水分率", f"{latest.get('bodyWater')}%" if latest.get("bodyWater") is not None else "—"],
+            ["摂取カロリー", f"{fmt_num(latest.get('intakeCalories'))} kcal"],
             ["消費カロリー", f"{fmt_num(latest.get('calories'))} kcal"],
+            ["カロリー収支", fmt_balance(bal)],
             ["睡眠", fmt_sleep(latest.get("sleepHours")) + (f"（スコア{latest['sleepScore']}）" if latest.get("sleepScore") else "")],
         ]
-        t2 = Table(status_data, colWidths=[100, 300])
-        t2.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "HeiseiKakuGo-W5"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
-            ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
-        ]))
+        t2 = Table(status_data, colWidths=[95, 330])
+        t2.setStyle(table_style())
         elements.append(t2)
     else:
         elements.append(Paragraph("記録がありません。", body_style))
 
-    elements.append(Paragraph("体重推移", h2_style))
-    chart = build_weight_chart_drawing(entries, config)
-    if chart:
-        elements.append(chart)
-        elements.append(Spacer(1, 10))
-    else:
-        elements.append(Paragraph("グラフを表示するには体重の記録が1件以上必要です。", body_style))
+    def pts(key):
+        return [(parse_date(e["date"]), e.get(key)) for e in entries]
 
-    if entries:
-        elements.append(Paragraph("記録履歴", h2_style))
-        header = ["日付", "体重", "体脂肪率", "体水分率", "睡眠", "メモ"]
-        rows = [header]
-        for e in entries:
-            rows.append([
-                e["date"],
-                f"{e['weight']:.2f}kg",
-                str(e.get("bodyFat", "—")),
-                str(e.get("bodyWater", "—")),
-                fmt_sleep(e.get("sleepHours")),
-                (e.get("notes") or "")[:30],
-            ])
-        t3 = Table(rows, colWidths=[55, 45, 55, 55, 60, 130])
-        t3.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), "HeiseiKakuGo-W5"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ]))
-        elements.append(t3)
+    elements.append(Paragraph("体重・体脂肪率・体水分率 推移", h2_style))
+    body_chart = build_multi_line_chart_drawing(
+        [
+            {"name": "体重", "points": pts("weight"), "color": "#D9A441", "axis": "left", "is_weight": True},
+            {"name": "体脂肪率", "points": pts("bodyFat"), "color": "#C1443C", "axis": "right"},
+            {"name": "体水分率", "points": pts("bodyWater"), "color": "#6E93B0", "axis": "right"},
+        ],
+        config, left_unit="kg", right_unit="%", left_step=1,
+    )
+    if body_chart:
+        elements.append(body_chart)
+    else:
+        elements.append(Paragraph("グラフを表示するには体重などの記録が1件以上必要です。", body_style))
+
+    elements.append(Paragraph("摂取カロリー・消費カロリー 推移", h2_style))
+    cal_chart = build_multi_line_chart_drawing(
+        [
+            {"name": "摂取カロリー", "points": pts("intakeCalories"), "color": "#6B9080", "axis": "left"},
+            {"name": "消費カロリー", "points": pts("calories"), "color": "#D9A441", "axis": "left"},
+        ],
+        config, left_unit="kcal",
+    )
+    if cal_chart:
+        elements.append(cal_chart)
+    else:
+        elements.append(Paragraph("グラフを表示するには、摂取カロリーまたは消費カロリーの記録が1件以上必要です。", body_style))
 
     doc.build(elements)
     buffer.seek(0)
@@ -555,6 +641,7 @@ def generate_pdf_report(config, entries):
 
 
 st.set_page_config(page_title="減量ログ", page_icon="🥊", layout="centered")
+
 
 def check_password():
     def password_entered():
@@ -618,29 +705,24 @@ if latest:
         st.metric("目標差", f"{'+' if delta > 0 else ''}{delta} kg")
     st.metric("体脂肪率", f"{latest.get('bodyFat')}%" if latest.get("bodyFat") is not None else "—")
     st.metric("体水分率", f"{latest.get('bodyWater')}%" if latest.get("bodyWater") is not None else "—")
-    st.metric("消費kcal", fmt_num(latest.get("calories")))
+    st.metric("摂取カロリー", f"{fmt_num(latest.get('intakeCalories'))} kcal")
+    st.metric("消費カロリー", f"{fmt_num(latest.get('calories'))} kcal")
+    st.metric("カロリー収支", fmt_balance(calorie_balance(latest)))
     st.metric("睡眠", fmt_sleep(latest.get("sleepHours")))
 
-st.subheader("項目別 推移")
-metric_options = {f"{m[1]}{f'（{m[2]}）' if m[2] else ''}": m[0] for m in METRICS}
-metric_label = st.selectbox("表示する項目", list(metric_options.keys()))
-chart_metric = metric_options[metric_label]
-metric_unit = METRIC_BY_KEY[chart_metric][2]
+weigh_in_d = parse_date(config.get("weighInDate"))
+fight_d = parse_date(config.get("fightDate"))
 
-metric_entries = [e for e in entries if e.get(chart_metric) is not None]
 
-if len(metric_entries) >= 2:
-    dates = [parse_date(e["date"]) for e in metric_entries]
-    values = [e[chart_metric] for e in metric_entries]
+def add_event_lines(fig):
+    """計量日・試合日・週マーカーを共通で追加する。
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=dates, y=values, mode="lines+markers", line=dict(color="#D9A441", width=2), marker=dict(size=7), name=metric_label))
-
-    weigh_in_d = parse_date(config.get("weighInDate"))
-    fight_d = parse_date(config.get("fightDate"))
-
+    注意: Plotlyのadd_vlineは内部でx位置の日付演算を行うため、datetime.date をそのまま渡すと
+    "unsupported operand type(s) for +: 'int' and 'datetime.date'" になる。ISO文字列で渡す。
+    計量日と試合日は近接しがちなのでラベルを上下2段に分けて重なりを防ぐ。
+    """
     if weigh_in_d:
-        earliest = min(dates) if dates else weigh_in_d
+        earliest = min([parse_date(e["date"]) for e in entries], default=weigh_in_d)
         cutoff = earliest - timedelta(days=7)
         n = 1
         while n <= 12:
@@ -650,31 +732,75 @@ if len(metric_entries) >= 2:
             fig.add_vline(x=marker_d.isoformat(), line_dash="dot", line_color="lightgray", line_width=1,
                           annotation_text=f"-{n}w", annotation_font_size=9, annotation_font_color="gray")
             n += 1
-
-    if weigh_in_d:
         fig.add_vline(x=weigh_in_d.isoformat(), line_dash="dash", line_color="#6E93B0",
                       annotation_text=f"計量日 {fmt_md(weigh_in_d)}", annotation_font_color="#6E93B0",
-                      annotation_position="top", annotation_y=1.12, annotation_yref="paper")
+                      annotation_position="top", annotation_y=1.16, annotation_yref="paper")
     if fight_d:
         fig.add_vline(x=fight_d.isoformat(), line_dash="dash", line_color="#C1443C",
                       annotation_text=f"試合日 {fmt_md(fight_d)}", annotation_font_color="#C1443C",
-                      annotation_position="top", annotation_y=1.02, annotation_yref="paper")
-    if chart_metric == "weight" and target:
-        fig.add_hline(y=target, line_dash="dash", line_color="#6B9080", annotation_text="目標体重")
-        if weigh_in_d:
-            fig.add_trace(go.Scatter(x=[weigh_in_d], y=[target], mode="markers",
-                                      marker=dict(size=12, color="#6B9080", line=dict(width=2, color="white")),
-                                      name="目標(計量日)"))
+                      annotation_position="top", annotation_y=1.05, annotation_yref="paper")
 
-    yaxis_kwargs = {}
-    if chart_metric == "weight":
-        yaxis_kwargs["dtick"] = 1
-    fig.update_layout(height=380, margin=dict(l=10, r=10, t=55, b=10), showlegend=False,
-                       yaxis_title=metric_unit, xaxis_title=None)
-    fig.update_yaxes(**yaxis_kwargs)
+
+def series_of(key):
+    picked = [e for e in entries if e.get(key) is not None]
+    return [parse_date(e["date"]) for e in picked], [e[key] for e in picked]
+
+
+# ---- グラフ1: 体重・体脂肪率・体水分率(スケールが違うので左右2軸) ----
+st.subheader("体重・体脂肪率・体水分率 推移")
+w_dates, w_vals = series_of("weight")
+bf_dates, bf_vals = series_of("bodyFat")
+bw_dates, bw_vals = series_of("bodyWater")
+
+if len(w_dates) + len(bf_dates) + len(bw_dates) >= 2:
+    fig = go.Figure()
+    if w_dates:
+        fig.add_trace(go.Scatter(x=w_dates, y=w_vals, mode="lines+markers", name="体重 (kg)",
+                                 line=dict(color="#D9A441", width=2), marker=dict(size=7), yaxis="y"))
+    if bf_dates:
+        fig.add_trace(go.Scatter(x=bf_dates, y=bf_vals, mode="lines+markers", name="体脂肪率 (%)",
+                                 line=dict(color="#C1443C", width=2), marker=dict(size=6), yaxis="y2"))
+    if bw_dates:
+        fig.add_trace(go.Scatter(x=bw_dates, y=bw_vals, mode="lines+markers", name="体水分率 (%)",
+                                 line=dict(color="#6E93B0", width=2), marker=dict(size=6), yaxis="y2"))
+    if target:
+        fig.add_hline(y=target, line_dash="dash", line_color="#6B9080", annotation_text="目標体重")
+    add_event_lines(fig)
+    fig.update_layout(
+        height=420, margin=dict(l=10, r=10, t=70, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+        yaxis=dict(title="kg", dtick=1),
+        yaxis2=dict(title="%", overlaying="y", side="right"),
+        xaxis_title=None,
+    )
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("左軸=体重(kg) / 右軸=体脂肪率・体水分率(%)。スケールが違うため2軸に分けています。")
 else:
-    st.info(f"このグラフを表示するにはあと{2 - len(metric_entries)}件の記録が必要です。")
+    st.info("このグラフを表示するには記録があと数件必要です。")
+
+# ---- グラフ2: 摂取カロリー・消費カロリー ----
+st.subheader("摂取カロリー・消費カロリー 推移")
+in_dates, in_vals = series_of("intakeCalories")
+out_dates, out_vals = series_of("calories")
+
+if len(in_dates) + len(out_dates) >= 2:
+    fig2 = go.Figure()
+    if in_dates:
+        fig2.add_trace(go.Scatter(x=in_dates, y=in_vals, mode="lines+markers", name="摂取カロリー",
+                                  line=dict(color="#6B9080", width=2), marker=dict(size=7)))
+    if out_dates:
+        fig2.add_trace(go.Scatter(x=out_dates, y=out_vals, mode="lines+markers", name="消費カロリー",
+                                  line=dict(color="#D9A441", width=2), marker=dict(size=7)))
+    add_event_lines(fig2)
+    fig2.update_layout(
+        height=420, margin=dict(l=10, r=10, t=70, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="left", x=0),
+        yaxis_title="kcal", xaxis_title=None,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+    st.caption("2本の線の差がカロリー収支です（摂取が下なら減量方向）。")
+else:
+    st.info("このグラフを表示するには、摂取カロリーまたは消費カロリーの記録があと数件必要です。")
 
 st.subheader("レポート出力")
 if st.button("📄 PDFレポートを生成"):
@@ -704,6 +830,7 @@ if st.button("📄 PDFレポートを生成"):
     st.caption("開いたタブの中で、ブラウザ標準の保存・印刷ボタンからPDF保存できます。")
     st.download_button("(うまく開けない場合はこちら: 直接ダウンロード)", data=pdf_bytes,
                         file_name=f"減量レポート_{date.today().isoformat()}.pdf", mime="application/pdf")
+
 st.subheader("画像から自動入力")
 api_key = st.text_input("Anthropic APIキー", value=os.environ.get("ANTHROPIC_API_KEY", ""), type="password",
                          help="ヘルスケアアプリ・体組成計アプリのスクリーンショットから自動で数値を読み取るために使います。")
@@ -842,6 +969,7 @@ f_time = st.text_input("計測時刻 (任意, HH:MM)", value="")
 f_weight = st.number_input("体重 (kg)", value=0.0, step=0.01, format="%.2f")
 f_bodyfat = st.number_input("体脂肪率 (%・任意)", value=0.0, step=0.1, format="%.1f")
 f_bodywater = st.number_input("体水分率 (%・任意)", value=0.0, step=0.1, format="%.1f")
+f_intake = st.number_input("摂取カロリー (kcal・任意)", value=0.0, step=1.0, format="%.0f")
 f_calories = st.number_input("消費カロリー (kcal・任意)", value=0.0, step=1.0, format="%.0f")
 f_sleep_h = st.number_input("睡眠時間 (時間・任意)", value=0.0, step=0.1, format="%.1f")
 f_sleep_score = st.number_input("睡眠スコア (任意)", value=0.0, step=1.0, format="%.0f")
@@ -867,6 +995,7 @@ if st.button("記録する", type="primary", disabled=(f_weight <= 0)):
         "weight": f_weight,
         "bodyFat": f_bodyfat or None,
         "bodyWater": f_bodywater or None,
+        "intakeCalories": f_intake or None,
         "calories": f_calories or None,
         "sleepHours": f_sleep_h or None,
         "sleepScore": f_sleep_score or None,
@@ -899,8 +1028,12 @@ if entries:
                 extra_bits.append(f"体脂肪:{e['bodyFat']}%")
             if e.get("bodyWater") is not None:
                 extra_bits.append(f"体水分:{e['bodyWater']}%")
+            if e.get("intakeCalories") is not None:
+                extra_bits.append(f"摂取:{fmt_num(e['intakeCalories'])}kcal")
             if e.get("calories") is not None:
                 extra_bits.append(f"消費:{fmt_num(e['calories'])}kcal")
+            if calorie_balance(e) is not None:
+                extra_bits.append(f"収支:{fmt_balance(calorie_balance(e))}")
             if e.get("sleepHours") is not None:
                 extra_bits.append(f"睡眠:{fmt_sleep(e['sleepHours'])}")
             if extra_bits:
